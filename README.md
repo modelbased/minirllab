@@ -55,4 +55,16 @@ Use bayesian optimisation to optimise hyperparameter(s):
   * ppo seems to really need different hyperparameters
 * hypertune.py
   * uses bayesian optimisation to tune selected hyperparameters
-  * uses multiprocessing to run multiple evaluations in parallel  
+  * uses multiprocessing to run multiple evaluations in parallel
+
+
+### Useful Links
+
+I found these particularly useful early on
+
+* https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
+* https://stable-baselines.readthedocs.io/en/master/guide/rl_tips.html
+* https://github.com/seungeunrho/minimalRL
+* https://andyljones.com/posts/rl-debugging.html
+* https://github.com/aowen87/ppo_and_friends
+  
