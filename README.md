@@ -2,9 +2,9 @@
 
 ### Easy Agent Experiments for Beginners
 
-I wrote this set of scripts to help me research and experiement with the latest concepts in RL, as well as a way to learn Python and PyTorch.
+I wrote this set of scripts to help me research and experiement with the latest papers in RL, as well as a way to learn Python and PyTorch.
 
-The focus of Mini RL Lab is on continous control gym-like environments aimed at physical systems or expensive-to-sample simulations - my personal research interest, and it makes the problem and architecture space tractable.
+The focus of Mini RL Lab is on continous control gym-like environments aimed at physical systems or expensive-to-sample simulations - my personal research interest, and it makes the problem and architecture space tractable on modest hardware.
 
 The basis is CleanRL's PPO agent [https://github.com/vwxyzjn/cleanrl] which I modified to:
 
