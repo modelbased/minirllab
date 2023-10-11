@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process, Queue
 from bayes_opt import BayesianOptimization, UtilityFunction
 from utils import log_scalars
-from agents.acw_v01_baseline1 import Agent
+from agents.sac_v01_baseline1 import Agent
 
 '''
     Hyperparameter tuning using bayesian optimisation
@@ -28,7 +28,6 @@ def run_env(cmd_queue, res_queue, current_time, environment, env_name, random_se
             sample_num      = sample_point["sample_num"]
 
             # Unknown reason cannot use sub-dictionary directly, have to put in new variable
-            update_steps    = environment['update_steps']
             run_steps       = environment['run_steps']
 
             # Create environment
@@ -43,7 +42,7 @@ def run_env(cmd_queue, res_queue, current_time, environment, env_name, random_se
             # weight_decay = next_point['weight_decay']
             
             # Create agent
-            agent = Agent(obs_dim, act_dim, num_steps=update_steps, device=device, seed=random_seed)
+            agent = Agent(obs_dim, act_dim, run_steps=run_steps, device=device, seed=random_seed)
 
             # Hyperparameters post agent initialisation, modified after instantiation
             agent.h.gamma                   = next_point['gamma']
@@ -58,7 +57,7 @@ def run_env(cmd_queue, res_queue, current_time, environment, env_name, random_se
             # agent.h.mb_size                 = int(next_point['mb_size'])    
             
             # New log for this environment
-            writer = SummaryWriter(f"hypertune/{current_time}/{env_name}/{agent.name}/{str(sample_num)}")
+            writer = SummaryWriter(f"runs_hypertune/{current_time}/{env_name}/{agent.name}/{str(sample_num)}")
 
             # Main loop: run environment for run_steps steps
             sps_timer = time.time()
@@ -74,33 +73,36 @@ def run_env(cmd_queue, res_queue, current_time, environment, env_name, random_se
                 reward_tensor = th.tensor(reward, device=device).unsqueeze(0).unsqueeze(0)
                 agent.store_transition(reward_tensor, done_tensor)
 
+                # Episodic score
                 score += reward
 
+                # Track episodic score
                 if done:
                     scoreboard = np.append(scoreboard, score)
                     obs, info  = env.reset(seed=random_seed)
                     writer.add_scalar(f"score/{env_name}", score, step)
                     score = np.zeros(1)
-                
-                if (((step + 1) % update_steps) == 0) and (step > 128):
-                    sps = update_steps / (time.time() - sps_timer)
-                    
-                    update_timer = time.time()
-                    agent.update()
-                    training_time = (time.time() - update_timer)
-                    
-                    writer.add_scalar("perf/Update", training_time, step)
-                    writer.add_scalar("perf/SPS", sps, step)
-                    log_scalars(writer, agent, step)
-                    print("Process: ", process_num, "SPS: %.0f" % sps, "Update time: %.1f" % training_time)
 
-                    # Start clock once update done
-                    sps_timer = time.time()
-            
+                # Call at every step, agent decides if an update if due
+                updated, update_time = agent.update()
+
+                # Track samples per second
+                if step % 1024 == 0 and step != 0:
+                    sps = step / (time.time() - sps_timer)
+                    writer.add_scalar("perf/SPS", sps, step)
+                    print(env_name,'-',process_num, 'Step: ',step, 'SPS: %0.0f' % sps, 'Scoreboard Sum %0.0f' % np.sum(scoreboard))
+
+                
+                # Log model update metrics
+                if updated:
+                    writer.add_scalar("perf/Update", update_time, step)
+                    log_scalars(writer, agent, step)
+
+            # Training run complete, log resulting target metric
             target_metric = np.sum(scoreboard)
             writer.add_hparams(hparam_dict=next_point, metric_dict={'score/target metric': target_metric}, run_name=str(sample_num))
 
-            # Return score to optimiser here
+            # Return target metric to optimiser
             result = {'target_metric': target_metric, 'sampled_point': next_point}
             res_queue.put(result)
 
@@ -126,9 +128,9 @@ def main():
     # https://gymnasium.farama.org
     # comment out undesired environments
     environments = {}
-    # environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3), 'update_steps': 1024 * 1}
-    environments['BipedalWalker-v3']            = {'run_steps': int(400e3), 'update_steps': 1024 * 2}
-    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(  2e6), 'update_steps': 1024 * 2}
+    environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
+    # environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
+    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(  2e6)}
 
     # start time of all runs
     current_time = time.strftime('%j_%H:%M')
@@ -200,7 +202,6 @@ def main():
         sample_point = {"next_sample":next_point, "sample_num":sample_count}
         cmd_queue.put(sample_point)
         sample_count += 1
-
 
 ##########################
 if __name__ == '__main__':

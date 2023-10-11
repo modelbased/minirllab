@@ -2,13 +2,15 @@
 
 ### Easy Agent Experiments for Beginners
 
-I wrote this set of scripts to help me research and experiement with the latest papers in RL, as well as a way to learn Python and PyTorch.
+I wrote this set of scripts to help me research and experiement with the latest concepts in RL, as well as a way to learn Python and PyTorch. 
 
-The focus of Mini RL Lab is on continous control gym-like environments aimed at physical systems or expensive-to-sample simulations - my personal research interest, and it makes the problem and architecture space tractable on modest hardware.
+It is a setup and workflow that works well for me to debug and experiment with concepts like agent algorithms, world models, planning, plasticity, transformers etc, and other beginners might find it a useful starting point for their own experiments.
 
-The basis is CleanRL's PPO agent [https://github.com/vwxyzjn/cleanrl] which I modified to:
+The focus of Mini RL Lab is on continous control gym-like environments aimed at physical systems or expensive-to-sample simulations - my personal research interest, and it makes the problem and architecture space tractable.
 
-1. Separate the environment rollout and logging from the agent code. CleanRL's single file approach is great but I find this arrangement easier to use for experiments
+The basis is CleanRL's PPO and SAC agents [https://github.com/vwxyzjn/cleanrl] which I modified to:
+
+1. Separate the environment rollout and logging from the agent code. CleanRL's single file approach is great but I find this arrangement easier for experiments
 2. Simplify the code
 3. Use different specialised training scripts
 
@@ -17,7 +19,7 @@ The basis is CleanRL's PPO agent [https://github.com/vwxyzjn/cleanrl] which I mo
 * Pytorch 2 (though 1.x will work with small changes)
 * Numpy (1.25 though older should work)
 * Tensorboard
-* Gymnasium[box2d] (https://gymnasium.farama.org) or your preferred env
+* Gymnasium[Box2D] and/or [mujoco] (https://gymnasium.farama.org)
 * Bayesian Optimisation (https://github.com/bayesian-optimization/BayesianOptimization)
 
 
@@ -25,7 +27,7 @@ The basis is CleanRL's PPO agent [https://github.com/vwxyzjn/cleanrl] which I mo
 
 Test a change quickly for major errors:
 
-`Python learn_simple.py`
+`Pythgon learn_simple.py`
 
 Training run with multiple random seeds logging to tensorboard:
 
@@ -41,30 +43,21 @@ Use bayesian optimisation to optimise hyperparameter(s):
 
 ### Usage Notes
 
-* acw_v01
-  * "actor critic world", based on CleanRL's continuous PPO agent 
-  * simplified for easy modifictions
-  * uses pytorch only (no numpy) for running on GPU (with e.g. brax gym)
-  * improved samples per second performance using torch.jit, torch.compile and other small optimisations
+* ppo_v01
+  * Based on CleanRL's continuous PPO agent 
+  * Simplified for easy modifictions
+  * Uses pytorch only for running on GPU (with e.g. brax gym)
+  * Improved samples per second performance using torch.jit, torch.compile and other small optimisations
 * learn_simple.py
   * Multiple training runs in parallel using multiprocessing (the processes have independent agents and environments)
-  * few assumptions about environments, more easily compatible with rl envs approximating the open ai gym api
-  * easy to edit and modify
+  * Few assumptions about environments, more easily compatible with rl envs approximating the open ai gym api
+  * Easy to edit and modify
+  * Use case: test performance of new feature on multiple environments with many random seeds in parallel
 * learn_vectorised.py
-  * no multiprocessing, runs a single process
-  * ppo seems to really need different hyperparameters in this case
+  * No multiprocessing, runs a single process
+  * PPO seems to really need different hyperparameters when vectorised
+  * Use case: check performance when vectorised
 * hypertune.py
   * uses bayesian optimisation to tune selected hyperparameters
   * uses multiprocessing to run multiple evaluations in parallel
-
-
-### Useful Links
-
-I found these particularly useful early on:
-
-* https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
-* https://stable-baselines.readthedocs.io/en/master/guide/rl_tips.html
-* https://github.com/seungeunrho/minimalRL
-* https://andyljones.com/posts/rl-debugging.html
-* https://github.com/aowen87/ppo_and_friends
-  
+  * Use case: optimise a new hyperparameter  

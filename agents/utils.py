@@ -3,7 +3,8 @@ import torch.nn as nn
 
 ''' Utility functions for agents '''
 
-# symlog() and symexp() are alternatives to running input normalisation, from https://arxiv.org/abs/2301.04104
+# symlog() and symexp() are alternatives to avg/mean running input normalisation 
+# Dreamer V3 https://arxiv.org/abs/2301.04104
 @torch.jit.script
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x)+1) 

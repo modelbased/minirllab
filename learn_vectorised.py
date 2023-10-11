@@ -4,7 +4,7 @@ import numpy as np
 import os, time, argparse
 from torch.utils.tensorboard import SummaryWriter
 from utils import log_scalars
-from agents.acw_v01_baseline1 import Agent
+from agents.sac_v01_baseline1 import Agent
 
 '''
 Vectorised gym script to test and tune continous agents
@@ -44,9 +44,9 @@ def main():
     # https://gymnasium.farama.org
     # comment out undesired environments
     environments = {}
-    environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3), 'update_steps': 1024}
-    # environments['BipedalWalker-v3']            = {'run_steps': int(400e3), 'update_steps': 1024 * 2}
-    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(1e6), 'update_steps': 1024 * 2}
+    environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
+    # environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
+    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(1e6)}
 
     # start time of all runs
     current_time = time.strftime('%j_%H:%M')
@@ -69,7 +69,7 @@ def main():
         print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim)
         
         # Create agent
-        agent = Agent(obs_dim, act_dim, num_steps=environments[env_name]['update_steps'], num_env=num_vecs, device=device)
+        agent = Agent(obs_dim, act_dim, run_steps=environments[env_name]['run_steps'], num_env=num_vecs, device=device)
         print('>>> RUNNING AGENT -> ', agent.name)
 
         # New log for this environment
@@ -78,20 +78,24 @@ def main():
             writer = SummaryWriter(f"{log_dir}/{current_time}/{env_name}/{agent.name}")
             # if args.name != None:
                 # writer.add_text(tag=f"score/{env_name}", text_string=args.name, global_step=0)
-            writer.add_text(tag=f"score/{env_name}", text_string=str(args.name) + " | "+ str(agent.h), global_step=0)
+            # writer.add_text(tag=f"score/{env_name}", text_string=str(args.name) + " | "+ str(agent.h), global_step=0)
+            writer.add_text("hyperparameters",str(args.name) + "\n\n" + "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(agent.h).items()])),)
 
 
         sps_timer = time.time()
         for step in (range(1, environments[env_name]['run_steps'])):
 
-            # Agent receives tensor and sends back tensor
+            # Agent receives tensor and sends back tensor shape (batch, channels)
             action = agent.choose_action(th.tensor(obs).to(device))
             obs, reward, terminated, truncated, info = vec_env.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
             agent.store_transition(th.tensor(reward).to(device), th.tensor(done).to(device))
             global_step += 1 * num_vecs
+            
+            # Episodic score
             score += reward
 
+            # Track episodic score
             if done.any():
                 score_sum += np.sum(score * done)
                 done_sum  += np.sum(done)
@@ -104,25 +108,26 @@ def main():
                             writer.add_scalar(f"score/{env_name}", i, step)
                 score = score * (1 - done) # reset to zero done episodes
 
-            if (((step) % (environments[env_name]['update_steps'])) == 0) and (step > 0):
-                sps = (environments[env_name]['update_steps'] * num_vecs) / (time.time() - sps_timer)
-                update_timer = time.time()
-                agent.update()
-                training_time = (time.time() - update_timer)
-                
+            # Call at every step, agent decides if an update if due
+            updated, update_time = agent.update()
+
+            # Track samples per second
+            if step % 1024 == 0 and step != 0:
+                sps = (step * num_vecs) / (time.time() - sps_timer)
+
                 # Update on progress
-                print('\033[4m','On global step: ',global_step, 'Updated in: %0.3f' % training_time, 'secs', 'SPS: %0.1f' % sps,'\033[0m')
+                print('\033[4m','On global step: ',global_step, 'Updated in: %0.3f' % update_time, 'secs', 'SPS: %0.1f' % sps,'\033[0m')
                 if done_sum > 0:
                     print(f"Done episodes: {done_sum}, Mean Score: %0.0f" % (score_sum / done_sum), "\n")
                 score_sum, done_sum = 0, 0
                 
                 if args.log:
-                    writer.add_scalar("perf/Update", training_time, step)
                     writer.add_scalar("perf/SPS", sps, step)
-                    log_scalars(writer, agent, step)
 
-                # start clock once update done
-                sps_timer = time.time()
+            # Log agent update metrics
+            if updated and args.log:
+                writer.add_scalar("perf/Update", update_time, step)
+                log_scalars(writer, agent, step)
         
         # Tidy up for running next environment
         if args.log: writer.close()
