@@ -5,7 +5,7 @@ import torch as th
 from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process
 from utils import log_scalars, Colour
-from agents.sac_v01_baseline1 import Agent
+from agents.sac_v01_l2init import Agent
 
 '''
     Simple script to test and tune continuous agents
@@ -59,10 +59,10 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
             # New log for this environment
             if log:
                 writer = SummaryWriter(f"{log_dir}/{current_time}/{env_name}/{agent.name}_seed:{random_seed}")
-                # writer.add_text(tag=f"score/{run_name}", text_string=str(run_name) + " | "+ str(agent.h), global_step=0)
                 writer.add_text("hyperparameters",str(run_name) + "\n\n" + "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(agent.h).items()])),)
 
             sps_timer = time.time()
+            update_step_counter = 0 # for agents that update every step, avoid GBs log files by logging less frequently
             for step in range(run_steps):
 
                 # Step the environment and collect observations, shape: (batch, channels) as tensors
@@ -71,8 +71,8 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
                 action_np = action_th.cpu().squeeze().numpy()
                 obs, reward, terminated, truncated, info = env.step(action_np)
                 done = (terminated or truncated)
-                done_th = th.tensor(done, device=device).unsqueeze(0)
-                reward_th = th.tensor(reward, device=device).unsqueeze(0).unsqueeze(0)
+                done_th = th.tensor(done, device=device, dtype=th.bool).unsqueeze(0)
+                reward_th = th.tensor(reward, device=device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
                 agent.store_transition(reward_th, done_th)
                 
                 # Episodic score
@@ -93,7 +93,8 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
 
                 # Track samples per second
                 if step % 1024 == 0 and step != 0:
-                    sps = step / (time.time() - sps_timer)
+                    sps = 1024 / (time.time() - sps_timer)
+                    sps_timer = time.time()
                     if log:
                         writer.add_scalar("perf/SPS", sps, step)
                         print(env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.0f' % sps, 'Scoreboard Sum %0.0f' % np.sum(scoreboard))
@@ -101,9 +102,11 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
                         print(Colour.BLUE,env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.0f' % sps, Colour.END)
 
                 # Log agent update metrics
-                if updated and log:
+                update_step_counter += 1
+                if updated and log and update_step_counter >= 1024:
                     writer.add_scalar("perf/Update", update_time, step)
                     log_scalars(writer, agent, step)
+                    update_step_counter = 0
 
         except KeyboardInterrupt:
             print("Stopping on keyboard interrupt")
@@ -120,9 +123,9 @@ def main():
     # System parameters
     args                = parse_args()
     random_seed         = 42    # default: 42 
-    max_processes       = 8    # processes will be queued
+    max_processes       = 8     # processes will be queued
+    th.set_num_threads(1)       # threads per process, often 1 is most efficient when using cpu
     os.nice(10)                 # don't hog the system
-    th.set_num_threads(2)       # threads per process, often 1 is most efficient when using cpu
     np.random.seed(random_seed)
     np.set_printoptions(precision=3)
     if args.cuda: 
@@ -136,15 +139,15 @@ def main():
     environments = {}
     
     # Box 2D (action range -1..+1)
-    environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
-    environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
-    environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(  1e6)}
+    # environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
+    # environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
+    environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(400e3)}
     
     # Mujoco (action range -1..+1 except Humanoid which is -0.4..+0.4)
-    environments['Ant-v4']                      = {'run_steps': int(400e3)}
-    environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
-    environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
-    environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
+    # environments['Ant-v4']                      = {'run_steps': int(400e3)}
+    # environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
+    # environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
+    # environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
 
     # start time of all runs
     current_time = time.strftime('%j_%H:%M')
@@ -155,7 +158,7 @@ def main():
 
     print("\nEXPERIMENT NAME: ", args.name)
     if args.log:
-        print(f'>>> TENSORBOARD -> ENABLED IN /{log_dir}/')
+        print(f'>>> TENSORBOARD -> ENABLED IN /{log_dir}/{current_time}')
 
     # Run a process for each seed of each env
     for seed in range(args.seeds):
@@ -191,8 +194,11 @@ def main():
     for p in processes:
         p.join()
 
-    print("\nCompleted runs in %0.3f" % (time.time() - start_runs), "secs")
-    print("--name:", args.name)
+    print("\n")
+    print("Completed runs in %0.3f" % (time.time() - start_runs), "secs")
+    print("Completed runs in %0.3f" % ((time.time() - start_runs) / 3600), "hours")
+    print("Log dir: /",log_dir,'/',current_time,'/')
+    print("\n--name:", args.name)
     print("Slept this long waiting for max_processes: %.03f" % total_sleep, ' secs')
         
 

@@ -48,7 +48,7 @@ def count_dead_units(model, input_data, threshold=0.1):
     # Register hooks for all layers
     hooks = []
     for layer in model.modules():
-        if isinstance(layer, (nn.ReLU, nn.Sigmoid, nn.Tanh, nn.LeakyReLU, nn.ELU)):
+        if isinstance(layer, (nn.ReLU, nn.Sigmoid, nn.Tanh, nn.LeakyReLU, nn.ELU, nn.SiLU)):
             hooks.append(layer.register_forward_hook(hook_fn))
 
     # Initialize max and min values for each layer's activations

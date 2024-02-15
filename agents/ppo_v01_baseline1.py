@@ -152,7 +152,7 @@ class Agent:
     def __init__(self, obs_dim, action_dim, run_steps, num_env=1, device='cpu', seed=42):
         
         # Make global
-        self.name           = "ppo_v01_baseline2"       # name for logging
+        self.name           = "ppo_v01_baseline1"       # name for logging
         self.obs_dim        = obs_dim                   # environment inputs for agent
         self.action_dim     = action_dim                # agent outputs to environment
         self.device         = device                    # gpu or cpu

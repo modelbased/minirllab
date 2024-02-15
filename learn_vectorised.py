@@ -83,6 +83,7 @@ def main():
 
 
         sps_timer = time.time()
+        update_step_counter = 0 # agents that update every step can create GBs of log data
         for step in (range(1, environments[env_name]['run_steps'])):
 
             # Agent receives tensor and sends back tensor shape (batch, channels)
@@ -125,9 +126,11 @@ def main():
                     writer.add_scalar("perf/SPS", sps, step)
 
             # Log agent update metrics
-            if updated and args.log:
+            update_step_counter += 1
+            if updated and args.log and update_step_counter >= 1024:
                 writer.add_scalar("perf/Update", update_time, step)
                 log_scalars(writer, agent, step)
+                update_step_counter = 0
         
         # Tidy up for running next environment
         if args.log: writer.close()
