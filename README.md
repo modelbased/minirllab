@@ -19,7 +19,7 @@ The basis is CleanRL's PPO and SAC agents [https://github.com/vwxyzjn/cleanrl] w
 * Pytorch 2 (though 1.x will work with small changes)
 * Numpy (1.25 though older should work)
 * Tensorboard
-* Gymnasium[Box2D] and/or [mujoco] (https://gymnasium.farama.org)
+* Gymnasium[Box2D] and/or [Mujoco] (https://gymnasium.farama.org)
 * Bayesian Optimisation (https://github.com/bayesian-optimization/BayesianOptimization)
 
 
@@ -27,7 +27,7 @@ The basis is CleanRL's PPO and SAC agents [https://github.com/vwxyzjn/cleanrl] w
 
 Test a change quickly for major errors:
 
-`Pythgon learn_simple.py`
+`Python learn_simple.py`
 
 Training run with multiple random seeds logging to tensorboard:
 
@@ -39,19 +39,19 @@ Run a vectorised environment with cuda and log:
 
 Use bayesian optimisation to optimise hyperparameter(s):
 
-`Python hyperturne.py`
+`Python hypertune.py`
 
 ### Usage Notes
 
 * ppo_v01
   * Based on CleanRL's continuous PPO agent 
   * Simplified for easy modifictions
-  * Uses pytorch only for running on GPU (with e.g. brax gym)
   * Improved samples per second performance using torch.jit, torch.compile and other small optimisations
 
 * sac_v01
-  * Based on CleanRL's SAC agent
+  * Based on CleanRL's continuous SAC agent
   * Simplified for easy modification
+  * Removed CUDA <> CPU synchronisations for better performance
 
 * learn_simple.py
   * Multiple training runs in parallel using multiprocessing (the processes have independent agents and environments)
@@ -67,4 +67,5 @@ Use bayesian optimisation to optimise hyperparameter(s):
 * hypertune.py
   * uses bayesian optimisation to tune selected hyperparameters
   * uses multiprocessing to run multiple evaluations in parallel
+  * implements a median pruner to stop badly performing runs early
   * Use case: optimise a new hyperparameter  

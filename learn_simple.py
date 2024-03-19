@@ -1,11 +1,11 @@
 import gymnasium as gym
 import numpy as np
-import os, time, argparse
+import os, time, argparse, random
 import torch as th
 from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process
 from utils import log_scalars, Colour
-from agents.sac_v01_l2init import Agent
+from agents.sac_v01_baseline import Agent
 
 '''
     Simple script to test and tune continuous agents
@@ -36,83 +36,79 @@ def parse_args():
 
 def run_env(current_time, env, env_name, random_seed, device, log, run_name, log_dir):
 
-        try:
+        # Unknown reason cannot use sub-dictionary directly, have to put in new variable
+        run_steps       = env['run_steps']
 
-            # Unknown reason cannot use sub-dictionary directly, have to put in new variable
-            run_steps       = env['run_steps']
+        # Create environment
+        env         = gym.make(env_name)
+        act_dim     = env.action_space.shape[0]      # different envs might provide this info differently
+        obs_dim     = env.observation_space.shape[0] # different envs might provide this info differently
+        obs, info   = env.reset(seed=random_seed)    # using the gym/gymnasium convention
+        score       = np.zeros(1)                    # episodic score
+        scoreboard  = np.zeros(1)                    # a list of episodic scores
+        
+        # Create agent
+        agent = Agent(obs_dim, act_dim, buffer_size=run_steps, device=device, seed=random_seed)
 
-            # Create environment
-            env         = gym.make(env_name)
-            act_dim     = env.action_space.shape[0]      # different envs might provide this info differently
-            obs_dim     = env.observation_space.shape[0] # different envs might provide this info differently
-            obs, info   = env.reset(seed=random_seed)    # using the gym/gymnasium convention
-            score       = np.zeros(1)                    # episodic score
-            scoreboard  = np.zeros(1)                    # a list of episodic scores
+        print('\n>>> RUNNING ENV: ', env_name, "WITH AGENT: ", agent.name)
+        print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim, "\n")
+        print(agent.h, '\n')
+        
+        # New log for this environment
+        if log:
+            writer = SummaryWriter(f"{log_dir}/{current_time}/{env_name}/{agent.name}_seed:{random_seed}")
+            writer.add_text("hyperparameters",str(run_name) + "\n\n" + "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(agent.h).items()])),)
+
+        sps_timer = time.time()
+        update_step_counter = 0 # for agents that update every step, avoid GBs log files by logging less frequently
+        for step in range(run_steps):
+
+            # Step the environment and collect observations, shape: (batch, channels) as tensors
+            obs_th = th.tensor(obs, device=device, dtype=th.float32).unsqueeze(0)
+            action_th = agent.choose_action(obs_th)
+            action_np = action_th.cpu().squeeze().numpy()
+            obs, reward, terminated, truncated, info = env.step(action_np)
+            done = (terminated or truncated)
+            done_th = th.tensor(done, device=device, dtype=th.bool).unsqueeze(0)
+            reward_th = th.tensor(reward, device=device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
+            agent.store_transition(reward_th, done_th)
             
-            # Create agent
-            agent = Agent(obs_dim, act_dim, run_steps=run_steps, device=device, seed=random_seed)
+            # Episodic score
+            score += reward
 
-            print('\n>>> RUNNING ENV: ', env_name, "WITH AGENT: ", agent.name)
-            print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim, "\n")
-            print(agent.h, '\n')
+            # Track episodic score
+            if done:
+                scoreboard = np.append(scoreboard, score)
+                obs, info  = env.reset(seed=random_seed)
+                if log: 
+                    writer.add_scalar(f"score/{env_name}", score, step)
+                else:
+                    print(env_name,'-',random_seed, 'Step: ', step, 'Score: %0.1f' % score[0])
+                score = np.zeros(1)
             
-            # New log for this environment
-            if log:
-                writer = SummaryWriter(f"{log_dir}/{current_time}/{env_name}/{agent.name}_seed:{random_seed}")
-                writer.add_text("hyperparameters",str(run_name) + "\n\n" + "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(agent.h).items()])),)
+            # Call at every step, agent decides if an update if due
+            updated, update_time = agent.update()
 
-            sps_timer = time.time()
-            update_step_counter = 0 # for agents that update every step, avoid GBs log files by logging less frequently
-            for step in range(run_steps):
+            # Track samples per second
+            if step % 1024 == 0 and step != 0:
+                sps = 1024 / (time.time() - sps_timer)
+                sps_timer = time.time()
+                if log:
+                    writer.add_scalar("perf/SPS", sps, step)
+                    # Median of latest 25% of scores
+                    print(env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.1f' % sps, 'Scoreboard Median: %0.1f' % np.median(scoreboard[int(len(scoreboard) * 0.75): len(scoreboard)]))
+                else:
+                    print(Colour.BLUE,env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.1f' % sps, Colour.END)
 
-                # Step the environment and collect observations, shape: (batch, channels) as tensors
-                obs_th = th.tensor(obs, device=device, dtype=th.float32).unsqueeze(0)
-                action_th = agent.choose_action(obs_th)
-                action_np = action_th.cpu().squeeze().numpy()
-                obs, reward, terminated, truncated, info = env.step(action_np)
-                done = (terminated or truncated)
-                done_th = th.tensor(done, device=device, dtype=th.bool).unsqueeze(0)
-                reward_th = th.tensor(reward, device=device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
-                agent.store_transition(reward_th, done_th)
-                
-                # Episodic score
-                score += reward
-
-                # Track episodic score
-                if done:
-                    scoreboard = np.append(scoreboard, score)
-                    obs, info  = env.reset(seed=random_seed)
-                    if log: 
-                        writer.add_scalar(f"score/{env_name}", score, step)
-                    else:
-                        print(env_name,'-',random_seed, 'Step: ', step, 'Score: %0.1f' % score[0])
-                    score = np.zeros(1)
-                
-                # Call at every step, agent decides if an update if due
-                updated, update_time = agent.update()
-
-                # Track samples per second
-                if step % 1024 == 0 and step != 0:
-                    sps = 1024 / (time.time() - sps_timer)
-                    sps_timer = time.time()
-                    if log:
-                        writer.add_scalar("perf/SPS", sps, step)
-                        print(env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.0f' % sps, 'Scoreboard Sum %0.0f' % np.sum(scoreboard))
-                    else:
-                        print(Colour.BLUE,env_name,'-',random_seed, 'Step: ',step, 'SPS: %0.0f' % sps, Colour.END)
-
-                # Log agent update metrics
-                update_step_counter += 1
-                if updated and log and update_step_counter >= 1024:
-                    writer.add_scalar("perf/Update", update_time, step)
-                    log_scalars(writer, agent, step)
-                    update_step_counter = 0
-
-        except KeyboardInterrupt:
-            print("Stopping on keyboard interrupt")
+            # Log agent update metrics
+            update_step_counter += 1
+            if updated and log and update_step_counter >= 1024:
+                writer.add_scalar("perf/Update", update_time, step)
+                log_scalars(writer, agent, step)
+                update_step_counter = 0
 
         # Tidy up when done
-        print(env_name,'-',random_seed, 'FINISHED. SUM OF ALL SCORES: %0.0f' % np.sum(scoreboard))        
+        print(env_name,'-',random_seed, 'FINISHED. MEDIAN OF FINAL 25pct of SCORES: %0.1f' % np.median(scoreboard[int(len(scoreboard) * 0.75): len(scoreboard)]))        
         if log: writer.close()
         env.close()
         del agent
@@ -124,30 +120,35 @@ def main():
     args                = parse_args()
     random_seed         = 42    # default: 42 
     max_processes       = 8     # processes will be queued
-    th.set_num_threads(1)       # threads per process, often 1 is most efficient when using cpu
+    th.set_num_threads(2)       # threads per process, often 1 is most efficient when using cpu with seed > 1
     os.nice(10)                 # don't hog the system
     np.random.seed(random_seed)
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    th.manual_seed(random_seed)
+    th.backends.cudnn.deterministic = True
     np.set_printoptions(precision=3)
     if args.cuda: 
         device          = 'cuda' # cuda can be faster when training is costly (large model or dataset)
     else:
-        device          = 'cpu'  # cpu is very often fastest 
+        device          = 'cpu'  # cpu is very often fastest for RL (small models)
     log_dir             = 'runs' # tensorboard logging dir
 
-    # Comment out undesired environments. Simultaneous processes will be num_envs x num_seeds up to max_processes
+    # Comment out undesired environments. Simultaneous processes: (num_envs * num_seeds) ≤ max_processes
+    # TODO: Add action range for each env in dict, can materially affect learning performance
     # https://gymnasium.farama.org
     environments = {}
     
     # Box 2D (action range -1..+1)
     # environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
     # environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
-    environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(400e3)}
+    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(400e3)}
     
     # Mujoco (action range -1..+1 except Humanoid which is -0.4..+0.4)
     # environments['Ant-v4']                      = {'run_steps': int(400e3)}
     # environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
     # environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
-    # environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
+    environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
 
     # start time of all runs
     current_time = time.strftime('%j_%H:%M')

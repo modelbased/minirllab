@@ -4,7 +4,7 @@ import numpy as np
 import os, time, argparse
 from torch.utils.tensorboard import SummaryWriter
 from utils import log_scalars
-from agents.sac_v01_baseline1 import Agent
+from agents.sac_v01_baseline import Agent
 
 '''
 Vectorised gym script to test and tune continous agents
@@ -69,7 +69,7 @@ def main():
         print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim)
         
         # Create agent
-        agent = Agent(obs_dim, act_dim, run_steps=environments[env_name]['run_steps'], num_env=num_vecs, device=device)
+        agent = Agent(obs_dim, act_dim, buffer_size=environments[env_name]['run_steps'], num_env=num_vecs, device=device)
         print('>>> RUNNING AGENT -> ', agent.name)
 
         # New log for this environment
