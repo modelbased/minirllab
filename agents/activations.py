@@ -8,6 +8,7 @@ import torch.nn as nn
 
 # Used for normalisation in Dreamer v3
 # https://arxiv.org/abs/2301.04104
+# A useful stat.stackexchnage comment on the derivative of symlog https://stats.stackexchange.com/questions/605641/why-isnt-symmetric-log1x-used-as-neural-network-activation-function
 class SymLog(nn.Module):
     def __init__(self) -> None:
         super().__init__()

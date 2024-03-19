@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from torch.distributions.normal import Normal
 from .normalise import NormaliseTorchScript
 from .activations import SymLog, LiSHT
-from .utils import init_weights, symlog, avg_weight_magnitude, count_dead_units
+from .utils import init_layer, symlog, avg_weight_magnitude, count_dead_units
 
 '''
     Based on https://github.com/vwxyzjn/cleanrl
@@ -85,9 +85,9 @@ class Actor(nn.Module):
         self.device = device
 
         # Actor network
-        self.fc0 = init_weights(nn.Linear(obs_dim, hidden_dim))
-        self.fc1 = init_weights(nn.Linear(hidden_dim, hidden_dim))
-        self.out = init_weights(nn.Linear(hidden_dim, action_dim), std=0.01) # Last layer init near zero (C57, https://arxiv.org/abs/2006.05990)
+        self.fc0 = init_layer(nn.Linear(obs_dim, hidden_dim))
+        self.fc1 = init_layer(nn.Linear(hidden_dim, hidden_dim))
+        self.out = init_layer(nn.Linear(hidden_dim, action_dim), std=0.01) # Last layer init near zero (C57, https://arxiv.org/abs/2006.05990)
         self.nonlin = nn.Tanh() # tanh preferred (C55, https://arxiv.org/abs/2006.05990)
 
         # ReZero for deep networks https://arxiv.org/abs/2003.04887
@@ -132,9 +132,9 @@ class Critic(nn.Module):
 
         # Critic network (C47, independent critic performs better https://arxiv.org/abs/2006.05990)
         # Wider than actor preferred for critic (~4x) (https://arxiv.org/abs/2006.05990)
-        self.fc0 = init_weights(nn.Linear(obs_dim, hidden_dim))
-        self.fc1 = init_weights(nn.Linear(hidden_dim, hidden_dim)) 
-        self.out = init_weights(nn.Linear(hidden_dim, 1), std=1.0) # Last layer init near one (C57, https://arxiv.org/abs/2006.05990)
+        self.fc0 = init_layer(nn.Linear(obs_dim, hidden_dim))
+        self.fc1 = init_layer(nn.Linear(hidden_dim, hidden_dim)) 
+        self.out = init_layer(nn.Linear(hidden_dim, 1), std=1.0) # Last layer init near one (C57, https://arxiv.org/abs/2006.05990)
         self.nonlin = nn.Tanh()
 
         # ReZero for deep networks https://arxiv.org/abs/2003.04887
@@ -152,7 +152,7 @@ class Agent:
     def __init__(self, obs_dim, action_dim, run_steps, num_env=1, device='cpu', seed=42):
         
         # Make global
-        self.name           = "ppo_v01_baseline1"       # name for logging
+        self.name           = "ppo_v01_baseline"       # name for logging
         self.obs_dim        = obs_dim                   # environment inputs for agent
         self.action_dim     = action_dim                # agent outputs to environment
         self.device         = device                    # gpu or cpu
