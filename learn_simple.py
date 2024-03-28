@@ -4,8 +4,9 @@ import os, time, argparse, random
 import torch as th
 from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process
+import multiprocessing as mp
 from utils import log_scalars, Colour
-from agents.sac_v01_baseline import Agent
+from agents.sac_v01_crossq import Agent
 
 '''
     Simple script to test and tune continuous agents
@@ -26,6 +27,8 @@ def parse_args():
     parser.add_argument('--name', type=str, help=('Name or describe this run in the logs'))
     parser.add_argument('--seeds', type=int, default=1, help=("Number of random seeds per environment"))
     parser.add_argument('--cuda', action='store_true', help=('Use CUDA'))
+    parser.add_argument('--baseline', action='store_true', help=('Saves logs in baseline sub-folder for archiving'))
+
     
     # TODO: As needed
     # parser.add_argument('--gui', action='store_true', help=('Enables visualisation'))
@@ -41,17 +44,21 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
 
         # Create environment
         env         = gym.make(env_name)
-        act_dim     = env.action_space.shape[0]      # different envs might provide this info differently
-        obs_dim     = env.observation_space.shape[0] # different envs might provide this info differently
+        env_spec    = {
+            'act_dim' : env.action_space.shape[0],
+            'obs_dim' : env.observation_space.shape[0],
+            'act_max' : env.action_space.high,
+            'act_min' : env.action_space.low,
+        }
         obs, info   = env.reset(seed=random_seed)    # using the gym/gymnasium convention
         score       = np.zeros(1)                    # episodic score
         scoreboard  = np.zeros(1)                    # a list of episodic scores
         
         # Create agent
-        agent = Agent(obs_dim, act_dim, buffer_size=run_steps, device=device, seed=random_seed)
+        agent = Agent(env_spec, buffer_size=run_steps, device=device, seed=random_seed)
 
         print('\n>>> RUNNING ENV: ', env_name, "WITH AGENT: ", agent.name)
-        print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim, "\n")
+        print('ACTIONS DIM: ', env_spec['act_dim'], ' OBS DIM: ', env_spec['obs_dim'], "\n")
         print(agent.h, '\n')
         
         # New log for this environment
@@ -82,8 +89,8 @@ def run_env(current_time, env, env_name, random_seed, device, log, run_name, log
                 obs, info  = env.reset(seed=random_seed)
                 if log: 
                     writer.add_scalar(f"score/{env_name}", score, step)
-                else:
-                    print(env_name,'-',random_seed, 'Step: ', step, 'Score: %0.1f' % score[0])
+                # else:
+                    # print(env_name,'-',random_seed, 'Step: ', step, 'Score: %0.1f' % score[0])
                 score = np.zeros(1)
             
             # Call at every step, agent decides if an update if due
@@ -119,8 +126,8 @@ def main():
     # System parameters
     args                = parse_args()
     random_seed         = 42    # default: 42 
-    max_processes       = 8     # processes will be queued
-    th.set_num_threads(2)       # threads per process, often 1 is most efficient when using cpu with seed > 1
+    max_processes       = 8     # small models (e.g. ppo) can have lots in cpu for greater total SPS
+    th.set_num_threads(1)       # threads per process, often 1 is most efficient when using cpu with seed > 1
     os.nice(10)                 # don't hog the system
     np.random.seed(random_seed)
     random.seed(random_seed)
@@ -128,14 +135,18 @@ def main():
     th.manual_seed(random_seed)
     th.backends.cudnn.deterministic = True
     np.set_printoptions(precision=3)
+    
     if args.cuda: 
-        device          = 'cuda' # cuda can be faster when training is costly (large model or dataset)
+        device          = 'cuda'  # cuda is faster when training is costly (large model or dataset)
     else:
-        device          = 'cpu'  # cpu is very often fastest for RL (small models)
-    log_dir             = 'runs' # tensorboard logging dir
+        device          = 'cpu'   # cpu is often faster for PPO (small models)
+    
+    if not args.baseline:
+        log_dir = 'runs'          # tensorboard logging dir
+    else:
+        log_dir = 'runs/baseline' # baselined agents archive for future comparisons
 
     # Comment out undesired environments. Simultaneous processes: (num_envs * num_seeds) ≤ max_processes
-    # TODO: Add action range for each env in dict, can materially affect learning performance
     # https://gymnasium.farama.org
     environments = {}
     
@@ -146,9 +157,10 @@ def main():
     
     # Mujoco (action range -1..+1 except Humanoid which is -0.4..+0.4)
     # environments['Ant-v4']                      = {'run_steps': int(400e3)}
-    # environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
+    environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
     # environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
     environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
+    # environments['HumanoidStandup-v4']          = {'run_steps': int(400e3)}
 
     # start time of all runs
     current_time = time.strftime('%j_%H:%M')
@@ -160,6 +172,9 @@ def main():
     print("\nEXPERIMENT NAME: ", args.name)
     if args.log:
         print(f'>>> TENSORBOARD -> ENABLED IN /{log_dir}/{current_time}')
+
+    # May be needed for torch.compile()
+    # mp.set_start_method('spawn')
 
     # Run a process for each seed of each env
     for seed in range(args.seeds):

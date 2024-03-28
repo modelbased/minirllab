@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process, Queue
 from bayes_opt import BayesianOptimization, UtilityFunction
 from utils import log_scalars
-from agents.sac_v01_l2droq import Agent
+from agents.sac_v01_baseline import Agent
 
 '''
     Hyperparameter tuning using bayesian optimisation
@@ -16,7 +16,7 @@ from agents.sac_v01_l2droq import Agent
 '''
 
 
-class Pruner:
+class Pruner():
     ''' Assumes target_metric is reward related therefore maximise to positive is better '''
     def __init__(self):
         self.window = 0.1 # allows this far below the median before pruning
@@ -67,22 +67,25 @@ def run_env(cmd_queue, sample_queue, res_queue, current_time, environment, env_n
 
             # Create environment
             env         = gym.make(env_name) 
-            act_dim     = env.action_space.shape[0]
-            obs_dim     = env.observation_space.shape[0]
+            env_spec    = {
+                'act_dim' : env.action_space.shape[0],
+                'obs_dim' : env.observation_space.shape[0],
+                'act_max' : env.action_space.high,
+                'act_min' : env.action_space.low,
+            }
             obs, info   = env.reset(seed=r_seed_mixed)
             score       = np.zeros(1) # total rewards for episode
             scoreboard  = np.zeros(1) # array of scores
 
             # Create agent with pre-initialisation hyperparameters
             # Remeber math.pow(10, p) for parameters using log ranges in hyperparameter_bounds
-            agent = Agent(obs_dim, 
-                          act_dim, 
-                          run_steps         = run_steps, 
+            agent = Agent(env_spec, 
+                          buffer_size       = run_steps, 
                           device            = device, 
                           seed              = random_seed, 
-                          l2init_lambda_q   = math.pow(10, next_point['l2init_lambda_q']), 
-                          l2init_lambda_a   = math.pow(10, next_point['l2init_lambda_a']), 
-                          rr                = next_point['replay_ratio'], 
+                        #   l2init_lambda_q   = math.pow(10, next_point['l2init_lambda_q']), 
+                        #   l2init_lambda_a   = math.pow(10, next_point['l2init_lambda_a']), 
+                        #   rr                = next_point['replay_ratio'], 
                         #   q_lr              = math.pow(10, next_point['q_lr']), 
                         #   actor_lr          = math.pow(10, next_point['actor_lr']),
                         #   alpha_lr          = math.pow(10, next_point['alpha_lr']),

@@ -4,7 +4,7 @@ import numpy as np
 import os, time, argparse
 from torch.utils.tensorboard import SummaryWriter
 from utils import log_scalars
-from agents.sac_v01_baseline import Agent
+from agents.ppo_v01_baseline import Agent
 
 '''
 Vectorised gym script to test and tune continous agents
@@ -57,8 +57,12 @@ def main():
         # Create environment
         envs        = [lambda: gym.make(env_name) for i in range(num_vecs)]
         vec_env     = gym.vector.AsyncVectorEnv(envs)
-        act_dim     = vec_env.single_action_space.shape[0]
-        obs_dim     = vec_env.single_observation_space.shape[0]
+        env_spec    = {
+            'act_dim' : vec_env.single_action_space.shape[0],
+            'obs_dim' : vec_env.single_observation_space.shape[0],
+            'act_max' : vec_env.action_space.high,
+            'act_min' : vec_env.action_space.low,
+        }
         obs, info   = vec_env.reset(seed=random_seed)
         score       = np.zeros(num_vecs)
         score_sum   = 0
@@ -66,10 +70,10 @@ def main():
         global_step = 0
 
         print('>>> RUNNING ENV   -> ', env_name, " NUM VECS: ",num_vecs)
-        print('ACTIONS DIM: ', act_dim, ' OBS DIM: ', obs_dim)
+        print('ACTIONS DIM: ', env_spec['act_dim'], ' OBS DIM: ', env_spec['obs_dim'])
         
         # Create agent
-        agent = Agent(obs_dim, act_dim, buffer_size=environments[env_name]['run_steps'], num_env=num_vecs, device=device)
+        agent = Agent(env_spec, buffer_size=environments[env_name]['run_steps'], num_env=num_vecs, device=device)
         print('>>> RUNNING AGENT -> ', agent.name)
 
         # New log for this environment
