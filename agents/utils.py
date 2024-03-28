@@ -57,7 +57,7 @@ def avg_weight_magnitude(model):
     total_weight_count = 0
     
     for param in model.parameters():
-        total_weight_sum   += torch.sum(torch.abs(param)).item()
+        total_weight_sum   += torch.sum(torch.abs(param))
         total_weight_count += param.numel()
 
     return total_weight_sum / total_weight_count
@@ -82,12 +82,14 @@ def count_dead_units(model, in1, in2=None, threshold=0.01):
     max_values = []
     min_values = []
 
+    model.eval() # dont mess with the model if it has e.g. batchnorm, dropout etc
     if in2 is None:
         with torch.no_grad():
             model(in1)
     else:
         with torch.no_grad():
             model(in1, in2)
+    model.train() # put it back how it was
 
     # Directly compute the max and min values for each activation unit
     max_values = [act.max(dim=0)[0] for act in activations]
@@ -99,7 +101,7 @@ def count_dead_units(model, in1, in2=None, threshold=0.01):
 
     for max_val, min_val in zip(max_values, min_values):
         dead_range = (max_val - min_val) < threshold
-        dead_units_count += dead_range.sum().item()
+        dead_units_count += dead_range.sum()
         total_units_count += max_val.numel()  # Since max_val and min_val have the same size, we can use either for counting
 
     # Clean up hooks

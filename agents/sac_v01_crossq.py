@@ -1,4 +1,4 @@
-import time
+import time, math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +9,16 @@ from .buffers import ReplayBufferSAC
 '''
     Based on https://github.com/vwxyzjn/cleanrl
     SAC agent https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/sac_continuous_action.py
+
+    CrossQ extensions to SAC influenced by:
+    - CrossQ: Batch Normalization in Deep Reinforcement Learning for Greater Sample Efficiency and Simplicity https://arxiv.org/abs/1902.05605
+    - v3 of the arxiv paper (2023)
+
+    Plasticity metrics and regularisation influnced by the following papers:
+    - Maintaining Plasticity in Continual Learning via Regenerative Regularization https://arxiv.org/abs/2308.11958
+    - Loss of Plasticity in Deep Continual Learning https://arxiv.org/abs/2306.13812
+    - Sample-Efficient Reinforcement Learning by Breaking the Replay Ratio Barrier https://openreview.net/forum?id=OpC-9aBBVJe
+    – Bigger, Better, Faster: Human-level Atari with human-level efficiency https://arxiv.org/abs/2305.19452
 '''
 
 
@@ -17,12 +27,16 @@ class SoftQNetwork(nn.Module):
         super().__init__()
 
         self.mlp = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_dim),
+            nn.Linear(obs_dim + action_dim, hidden_dim, bias=False), # batchnorm has bias, this one is redundant
+            nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
             nn.ReLU(),
-            nn.Linear(hidden_dim,hidden_dim),
+            nn.Linear(hidden_dim,hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
+
+        # init_model(self.mlp, init_method='xavier_uniform_') # CrossQ no mention of init
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
@@ -33,25 +47,30 @@ class SoftQNetwork(nn.Module):
 class Actor(nn.Module):
     def __init__(self, env_spec, hidden_dim=256):
         super().__init__()
+        
         obs_dim = env_spec['obs_dim']
         act_dim = env_spec['act_dim']
-
-        self.fc0       = nn.Linear(obs_dim, hidden_dim)
-        self.fc1       = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
+            nn.ReLU(),
+            nn.Linear(hidden_dim,hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
+            nn.ReLU(),
+        )
         self.fc_mean   = nn.Linear(hidden_dim, act_dim)
         self.fc_logstd = nn.Linear(hidden_dim, act_dim)
-        self.nonlin    = nn.ReLU() # If the non-linearity has state (e.g. trainable parameter) we need one per use
 
         action_high       = nn.Parameter(torch.tensor(env_spec['act_max']), requires_grad=False)
         action_low        = nn.Parameter(torch.tensor(env_spec['act_min']), requires_grad=False)
-        self.action_scale = nn.Parameter(torch.tensor((action_high - action_low) * 0.5), requires_grad=False)
-        self.action_bias  = nn.Parameter(torch.tensor((action_high + action_low) * 0.5), requires_grad=False)
+        self.action_scale = nn.Parameter((action_high - action_low) * 0.5, requires_grad=False)
+        self.action_bias  = nn.Parameter((action_high + action_low) * 0.5, requires_grad=False)
         self.log_std_max  = 2
         self.log_std_min  = -5
 
     def forward(self, x):
-        x       = self.nonlin(self.fc0(x))
-        x       = self.nonlin(self.fc1(x))
+        x       = self.mlp(x)
         mean    = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
@@ -75,10 +94,20 @@ class Actor(nn.Module):
 
 
 class Agent:
-    def __init__(self, env_spec, buffer_size=int(1e6), num_env=1, device='cpu', seed=42):
+    def __init__(self, 
+                 env_spec, 
+                 buffer_size=int(1e6), 
+                 num_env=1, 
+                 device='cpu', 
+                 seed=42, 
+                 rr=1, # RR = 1 for CrossQ
+                 q_lr=1e-3, # CrossQ learning rates
+                 actor_lr=1e-3, 
+                 alpha_lr=1e-3,
+                 ):
         
         # Make global
-        self.name           = "sac_v01_baseline"     # name for logging
+        self.name           = "sac_v01_crossq"       # name for logging
         self.obs_dim        = env_spec['obs_dim']    # environment inputs for agent
         self.action_dim     = env_spec['act_dim']    # agent outputs to environment
         self.act_max        = env_spec['act_max']    # action range, scalar or vector
@@ -93,16 +122,17 @@ class Agent:
         # Hyperparameters
         hyperparameters = {
         "gamma"             : 0.99,     # (def: 0.99) Discount factor
-        "q_lr"              : 1e-3,     # (def: 1e-3) Q learning rate 
-        "actor_lr"          : 3e-4,     # (def: 3e-4) Policy learning rate
+        "q_lr"              : q_lr,     # (def: 1e-3) Q learning rate 
+        "a_lr"              : actor_lr, # (def: 1e-3) Policy learning rate
+        "alpha_lr"          : alpha_lr, # (def: 1e-3) alpha auto entropoty tuning learning rate
         "learn_start"       : int(5e3), # (def: 5e3) Start updating policies after this many global steps
         "batch_size"        : 256,      # (def: 256) Batch size of sample from replay buffer
-        "policy_freq"       : 2,        # (def: 2) the frequency of training policy (delayed)
-        "target_net_freq"   : 1,        # (def: 1) Denis Yarats' implementation delays this by 2
-        "tau"               : 0.005,    # (def: 0.005) target smoothing coefficient
-        "dead_hurdle"       : 0.01,     # (def: 0.01) units with greater variation in output over one batch of data than this are not dead in plasticity terms
+        "policy_freq"       : 3,        # (def: 3) CrossQ
+        "dead_hurdle"       : 0.001,    # (def: 0.001) units with greater variation in output over one batch of data than this are not dead in plasticity terms
         "a_hidden_dim"      : 256,      # (def: 256) size of actor's hidden layer(s)
-        "q_hidden_dim"      : 256,      # (def: 256) size of Q's hidden layer(s)
+        "q_hidden_dim"      : 2048,     # (def: 2048) CrossQ with 512 wide Qf did just as well, but with a little more variance
+        "replay_ratio"      : round(rr),
+        "adam_betas"        : (0.5, 0.999), # CrossQ
         }
         self.h = SimpleNamespace(**hyperparameters)
 
@@ -122,23 +152,20 @@ class Agent:
         self.qf2_dead_pct       = 0     # percentage of units which are dead by some threshold
 
         # Instantiate actor and Q networks, optimisers
-        # AdamW (may have) resulted in more stable training than Adam
+        # CrossQ uses Adam but experience with AdamW is better
         self.qf1        = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
         self.qf2        = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
-        self.qf1_target = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
-        self.qf2_target = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
-        self.q_optim    = torch.optim.Adam(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=self.h.q_lr)
-        self.qf1_target.load_state_dict(self.qf1.state_dict())
-        self.qf2_target.load_state_dict(self.qf2.state_dict())
+        self.q_optim    = torch.optim.AdamW(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=self.h.q_lr, betas=self.h.adam_betas)
         
         self.actor       = Actor(env_spec, self.h.a_hidden_dim).to(device)
-        self.actor_optim = torch.optim.Adam(list(self.actor.parameters()), lr=self.h.actor_lr)
+        self.actor_optim = torch.optim.AdamW(list(self.actor.parameters()), lr=self.h.a_lr)
+        # init_model(self.actor, init_method='xavier_uniform_') # CrossQ no mention of init
         
         # Use automatic entropy tuning
         self.target_entropy = -torch.prod(torch.Tensor((self.action_dim,)).to(device)).item()
-        self.log_alpha      = torch.zeros(1, requires_grad=True, device=device)
+        self.log_alpha      = torch.tensor((math.log(0.1)), requires_grad=True, device=device)
         self.alpha          = self.log_alpha.exp().item()
-        self.alpha_optim    = torch.optim.Adam([self.log_alpha], lr=self.h.q_lr)
+        self.alpha_optim    = torch.optim.AdamW([self.log_alpha], lr=self.h.alpha_lr)
 
         # Storage setup
         self.rb          = ReplayBufferSAC(self.obs_dim, self.action_dim, buffer_size, num_env, device=self.device)
@@ -153,7 +180,9 @@ class Agent:
             action = action * self.actor.action_scale + self.actor.action_bias # apply scale and bias
         else:
             with torch.no_grad():
+                self.actor.eval() # prevent changes to batchnorm layers
                 action, _, _ = self.actor.get_action(obs)
+                self.actor.train()
         self.rb.store_choice(obs, action)
         return action
 
@@ -174,54 +203,69 @@ class Agent:
             updated       = True
             chronos_start = time.time()
 
-            b_obs, b_actions, b_obs_next, b_rewards, b_dones = self.rb.sample(self.h.batch_size)
+            for replay in range(0, self.h.replay_ratio):
+    
+                b_obs, b_actions, b_obs_next, b_rewards, b_dones = self.rb.sample(self.h.batch_size)
 
-            with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = self.actor.get_action(b_obs_next)
-                qf1_next_target    = self.qf1_target(b_obs_next, next_state_actions)
-                qf2_next_target    = self.qf2_target(b_obs_next, next_state_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
-                next_q_value       = b_rewards.flatten() + (1 - b_dones.flatten()) * self.h.gamma * (min_qf_next_target).view(-1)
+                with torch.no_grad():
+                    self.actor.eval()
+                    next_state_actions, next_state_log_pi, _ = self.actor.get_action(b_obs_next)
+                    self.actor.train()
 
-            self.qf1_a_values = self.qf1(b_obs, b_actions).view(-1)
-            self.qf2_a_values = self.qf2(b_obs, b_actions).view(-1)
-            self.qf1_loss     = F.mse_loss(self.qf1_a_values, next_q_value)
-            self.qf2_loss     = F.mse_loss(self.qf2_a_values, next_q_value)
-            self.qf_loss      = self.qf1_loss + self.qf2_loss
+                bb_obs  = torch.cat((b_obs, b_obs_next), dim=0)
+                bb_acts = torch.cat((b_actions, next_state_actions), dim=0)
 
-            self.q_optim.zero_grad()
-            self.qf_loss.backward()
-            self.q_optim.step()
+                bb_q1 = self.qf1(bb_obs, bb_acts)
+                bb_q2 = self.qf2(bb_obs, bb_acts)
 
+                b_q1, b_q1_next = torch.chunk(bb_q1, chunks=2, dim=0)
+                b_q2, b_q2_next = torch.chunk(bb_q2, chunks=2, dim=0)
+                self.qf1_a_values = b_q1 # TODO: Align var names
+                self.qf2_a_values = b_q2 # mean of this is used in logging
+
+                min_q_next   = torch.min(b_q1_next, b_q2_next) - self.alpha * next_state_log_pi
+                next_q_value = b_rewards.flatten() + (1 - b_dones.flatten()) * self.h.gamma * (min_q_next).view(-1)
+                torch.detach_(next_q_value) # no gradients through here
+
+                self.qf1_loss     = F.mse_loss(b_q1.flatten(), next_q_value)
+                self.qf2_loss     = F.mse_loss(b_q2.flatten(), next_q_value)
+                self.qf_loss      = self.qf1_loss + self.qf2_loss
+
+                self.q_optim.zero_grad()
+                self.qf_loss.backward()
+                self.q_optim.step()
+
+            # Replay Ratio does not apply to actor nor to alpha 
             # update actor network and alpha parameter
+
             if self.global_step % self.h.policy_freq == 0:  # TD 3 Delayed update support
-                for _ in range(self.h.policy_freq):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _   = self.actor.get_action(b_obs)
-                    qf1_pi          = self.qf1(b_obs, pi)
-                    qf2_pi          = self.qf2(b_obs, pi)
-                    min_qf_pi       = torch.min(qf1_pi, qf2_pi).view(-1)
-                    self.actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+                pi, log_pi, _   = self.actor.get_action(b_obs)
+                
+                self.qf1.eval()
+                self.qf2.eval()
+                qf1_pi          = self.qf1(b_obs, pi)
+                qf2_pi          = self.qf2(b_obs, pi)
+                self.qf1.train()
+                self.qf2.train()
 
-                    self.actor_optim.zero_grad()
-                    self.actor_loss.backward()
-                    self.actor_optim.step()
+                min_qf_pi       = torch.min(qf1_pi, qf2_pi).view(-1)
+                self.actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
-                    # Autotune alpha 
-                    with torch.no_grad():
-                        _, log_pi, _ = self.actor.get_action(b_obs)
-                    self.alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
+                self.actor_optim.zero_grad()
+                self.actor_loss.backward()
+                self.actor_optim.step()
 
-                    self.alpha_optim.zero_grad()
-                    self.alpha_loss.backward()
-                    self.alpha_optim.step()
-                    self.alpha = self.log_alpha.exp().detach().clone()
+                # Autotune alpha 
+                with torch.no_grad():
+                    self.actor.eval()
+                    _, log_pi, _ = self.actor.get_action(b_obs)
+                    self.actor.train()
+                self.alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
 
-            # update the target networks
-            if self.global_step % self.h.target_net_freq == 0:
-                for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
-                    target_param.data.copy_(self.h.tau * param.data + (1 - self.h.tau) * target_param.data)
-                for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
-                    target_param.data.copy_(self.h.tau * param.data + (1 - self.h.tau) * target_param.data)
+                self.alpha_optim.zero_grad()
+                self.alpha_loss.backward()
+                self.alpha_optim.step()
+                self.alpha = self.log_alpha.exp().detach().clone()
             
             # Plasticity metrics occasionally
             if self.global_step % 2048 == 0 or self.global_step == self.h.learn_start:

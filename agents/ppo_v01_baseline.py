@@ -2,79 +2,18 @@ import math
 import time
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from types import SimpleNamespace
 from torch.distributions.normal import Normal
 from .normalise import NormaliseTorchScript
-from .activations import SymLog, LiSHT
 from .utils import init_layer, symlog, avg_weight_magnitude, count_dead_units
+from .buffers import ReplayBufferPPO 
 
 '''
     Based on https://github.com/vwxyzjn/cleanrl
     PPO agent with RPO option https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_continuous_action.py
     Note: CleanRL version uses gym.wrappers.NormalizeReward(), which materially improves performance in some environments.
 '''
-
-class ReplayBuffer:
-    """
-        Call reset or flush at the end of a update
-        Must call .store_transition() to advance pointer
-    """
-    def __init__(self, obs_dim, action_dim, num_steps, num_env, device):
-        
-        self.obs_dim    = obs_dim
-        self.action_dim = action_dim
-
-        # Storage setup
-        self.obs        = torch.zeros((num_steps, num_env) + (obs_dim,)).to(device)
-        self.actions    = torch.zeros((num_steps, num_env) + (action_dim,)).to(device)
-        self.logprobs   = torch.zeros((num_steps, num_env)).to(device)
-        self.rewards    = torch.zeros((num_steps, num_env)).to(device)
-        self.dones      = torch.zeros((num_steps, num_env)).to(device)
-
-        # Size in steps 
-        self.max_size   = num_steps        
-        self.size       = 0
-
-    def store_choice(self, obs, action, logprob):
-        self.obs[self.size]        = obs
-        self.actions[self.size]    = action
-        self.logprobs[self.size]   = logprob
-            
-    def store_transition(self, reward, done):
-        self.rewards[self.size]    = reward
-        self.dones[self.size]      = done
-        self.size += 1
-
-    def get_ppo_update(self):
-        s           = int(self.size)
-        # Flatten the batch
-        b_obs       = self.obs[0:s].reshape((-1,) + (self.obs_dim,)) 
-        b_actions   = self.actions[0:s].reshape((-1,) + (self.action_dim,)) 
-        b_logprobs  = self.logprobs[0:s].reshape(-1) 
-        return b_obs, b_actions, b_logprobs
-
-    def get_gae(self):
-        s           = int(self.size)
-        # Don't flatten for GAE
-        b_obs       = self.obs[0:s]
-        b_rewards   = self.rewards[0:s]
-        b_dones     = self.dones[0:s]
-        return b_obs, b_rewards, b_dones
-
-    def get_obs(self):
-        s = int(self.size)
-        return self.obs[0:s].reshape((-1,) + (self.obs_dim,))
-
-    def reset(self):
-        self.size = 0
-
-    def flush(self):
-        self.obs.zero_()
-        self.actions.zero_()
-        self.logprobs.zero_()
-        self.rewards.zero_()
-        self.dones.zero_()
-        self.size   = 0
 
 
 class Actor(nn.Module):
@@ -112,12 +51,12 @@ class Actor(nn.Module):
         action_std = torch.exp(action_logstd)
 
         if action is None:
-            probs  = Normal(action_mean, action_std)
-            action = probs.sample()
+            probs  = Normal(action_mean, action_std, validate_args=False)
+            action = probs.rsample()
         else: # RPO option
-            z           = torch.FloatTensor(action_mean.shape).uniform_(-self.rpo_alpha, self.rpo_alpha).to(self.device)
+            z           = (torch.rand((action_mean.shape), device=self.device) - 0.5) * 2.0 * self.rpo_alpha # z = -rpo..+rpo
             action_mean = action_mean + z
-            probs       = Normal(action_mean, action_std)
+            probs       = Normal(action_mean, action_std, validate_args=False)
 
         log_prob = probs.log_prob(action).sum(1)
         entropy  = probs.entropy().sum(1) # important: is there a lenght dim to consider in sum axis?
@@ -149,17 +88,21 @@ class Critic(nn.Module):
 
 
 class Agent:
-    def __init__(self, obs_dim, action_dim, run_steps, num_env=1, device='cpu', seed=42):
+    def __init__(self, env_spec, buffer_size, num_env=1, device='cpu', seed=42):
         
         # Make global
-        self.name           = "ppo_v01_baseline"       # name for logging
-        self.obs_dim        = obs_dim                   # environment inputs for agent
-        self.action_dim     = action_dim                # agent outputs to environment
-        self.device         = device                    # gpu or cpu
+        self.name           = "ppo_v01_baseline"     # name for logging
+        self.obs_dim        = env_spec['obs_dim']    # environment inputs for agent
+        self.action_dim     = env_spec['act_dim']    # agent outputs to environment
+        self.act_max        = env_spec['act_max']    # action range, scalar or vector
+        self.act_min        = env_spec['act_min']    # action range, scalar or vector
+        self.device         = device                 # gpu or cpu
 
         # All seeds default to 42
         torch.manual_seed(torch.tensor(seed))
         torch.backends.cudnn.deterministic = True
+        # torch.cuda.set_sync_debug_mode(1)            # Set to 1 to receive warnings
+
         
         # Hyperparameters
         hyperparameters = {
@@ -179,7 +122,7 @@ class Agent:
         "update_epochs"  : 10,            # (def: 10) the K epochs to update the policy
         "mb_size"        : 64,            # (def: 64) the size of mini batches. CleanRL multiplies this by num_envs when vectorised
         "update_step"    : 2048,          # (def: 2048) perform update after this many environmental steps
-        "dead_hurdle"    : 0.01,          # (def: 0.01) units with greater variation in output over one batch of data than this are not dead in plasticity terms
+        "dead_hurdle"    : 0.001,         # (def: 0.001) units with greater variation in output over one batch of data than this are not dead in plasticity terms
         "a_hidden_dim"   : 64,            # (def: 64) actor's hidden layers dim
         "c_hidden_dim"   : 64,            # (def: 64) critic's hidden layers dim
         }
@@ -199,13 +142,13 @@ class Agent:
         self.actor_dead_pct     = 0       # percentage of units which are dead by some threshold
         self.critic_dead_pct    = 0       # percentage of units which are dead by some threshold
 
-        # Storage setup
-        self.rb = ReplayBuffer(self.obs_dim, self.action_dim, self.h.update_step, num_env, device=self.device)
+        # Buffer only needs to be as large as update_step, so replay_buffer is redundand and kept for api compatibility
+        self.rb = ReplayBufferPPO(self.obs_dim, self.action_dim, self.h.update_step, num_env, device=self.device)
         self.global_step = 0
 
         # Normalise state observations. Use symlog for reward "normalisation" – experimentally best results on Box2D and Mujoco
         # https://arxiv.org/pdf/2006.05990.pdf (C64) and https://arxiv.org/pdf/2005.12729.pdf
-        self.normalise_observations = torch.jit.script(NormaliseTorchScript(obs_dim, num_env, device=self.device))
+        self.normalise_observations = torch.jit.script(NormaliseTorchScript(self.obs_dim, num_env, device=self.device))
         # self.normalise_rewards      = torch.jit.script(NormaliseTorchScript(1, num_env, device=self.device))
 
         # Instantiate actor and critic networks, same optimiser parameters
@@ -214,6 +157,7 @@ class Agent:
         
         self.critic  = Critic(self.obs_dim, hidden_dim=self.h.c_hidden_dim).to(self.device)
         self.optim_c = torch.optim.AdamW(self.critic.parameters(), lr=self.h.adam_lr, eps=self.h.adam_eps, weight_decay=self.h.weight_decay)
+
 
     # Values from environments must be pytorch tensors of shape (batch, channels)
     def choose_action(self, obs):
@@ -239,7 +183,7 @@ class Agent:
             b_values   = self.critic(b_obs).squeeze(2) # latest critic values
             next_value = b_values[b_size - 1].reshape(1,-1)
         
-            b_advantages = torch.zeros_like(b_rewards).to(self.device)
+            b_advantages = torch.zeros_like(b_rewards, device=self.device)
             lastgaelam = 0
             for t in reversed(range(b_size)):
                 if t == b_size - 1:
@@ -270,7 +214,7 @@ class Agent:
             b_obs, b_actions, b_logprobs = self.rb.get_ppo_update()
             batch_end = self.rb.size - 1 # index to last element
 
-            clipfracs = torch.zeros(0).to(self.device)
+            clipfracs = torch.zeros(0, device=self.device)
             self.ppo_updates = 0
             for epoch in range(self.h.update_epochs):
 
@@ -280,7 +224,7 @@ class Agent:
                     if self.h.norm_adv:
                         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-                b_inds = torch.randperm(batch_end) # shuffled indices of the batch
+                b_inds = torch.randperm(batch_end, device=self.device) # shuffled indices of the batch
                 for start in range(0, batch_end, self.h.mb_size):
                     end     = min(start + self.h.mb_size, batch_end)
                     mb_inds = b_inds[start:end]
@@ -314,8 +258,8 @@ class Agent:
 
                     # Value loss
                     mb_newvalues = self.critic(mb_obs).view(-1)
-                    self.v_loss = 0.5 * ((mb_newvalues - b_returns[mb_inds]) ** 2).mean()
-                    
+                    self.v_loss = F.mse_loss(mb_newvalues, b_returns[mb_inds])
+
                     # Skip this minibatch update just before applying .step() if max kl exceeded 
                     if self.h.max_kl is not None:
                         if self.approx_kl > self.h.max_kl: break
@@ -337,7 +281,7 @@ class Agent:
             # the explained variance for the value function
             y_pred, y_true = b_values, b_returns
             var_y = torch.var(y_true)
-            self.explained_var = torch.nan if var_y == 0 else 1 - torch.var(y_true - y_pred) / var_y
+            self.explained_var = 1 - torch.var(y_true - y_pred) / var_y
             
             # the fraction of the training data that triggered the clipped objective
             self.clipfracs = torch.mean(clipfracs)
@@ -347,8 +291,8 @@ class Agent:
             self.critic_avg_wgt_mag = avg_weight_magnitude(self.critic)
             
             b_obs = self.rb.get_obs()
-            _, _, self.actor_dead_pct  = count_dead_units(self.actor, b_obs, self.h.dead_hurdle)
-            _, _, self.critic_dead_pct = count_dead_units(self.critic, b_obs, self.h.dead_hurdle)
+            _, _, self.actor_dead_pct  = count_dead_units(self.actor, in1=b_obs, threshold=self.h.dead_hurdle)
+            _, _, self.critic_dead_pct = count_dead_units(self.critic, in1=b_obs, threshold=self.h.dead_hurdle)
             
             # reset replay buffer and calc time taken
             self.rb.flush()
