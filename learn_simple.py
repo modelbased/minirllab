@@ -159,7 +159,7 @@ def main():
     # environments['Ant-v4']                      = {'run_steps': int(400e3)}
     environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
     # environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
-    environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
+    # environments['Humanoid-v4']                 = {'run_steps': int(400e3)}
     # environments['HumanoidStandup-v4']          = {'run_steps': int(400e3)}
 
     # start time of all runs
