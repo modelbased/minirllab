@@ -11,8 +11,10 @@ The focus of Mini RL Lab is on continous control gym-like environments aimed at 
 The basis is CleanRL's PPO and SAC agents [https://github.com/vwxyzjn/cleanrl] which I modified to:
 
 1. Separate the environment rollout and logging from the agent code. CleanRL's single file approach is great but I find this arrangement easier for experiments
-2. Simplify the code
+2. Simplify the code, improve performance where possible
 3. Use different specialised training scripts
+4. Include algorithms + variants as baselines with which to compare
+
 
 ### Prerequisites
 
@@ -46,13 +48,15 @@ Use bayesian optimisation to optimise hyperparameter(s):
 * ppo_v01
   * Based on CleanRL's continuous PPO agent 
   * Simplified for easy modifictions
-  * Improved samples per second performance using torch.jit, torch.compile and other small optimisations
+  * Improved samples per second through small optimisations
 
 * sac_v01
   * Based on CleanRL's continuous SAC agent
   * Simplified for easy modification
   * Removed CUDA <> CPU synchronisations for better performance
-
+  * Variants: DroQ and CrossQ
+    * CrossQ in particular is great, see the paper: https://arxiv.org/abs/1902.05605
+     
 * learn_simple.py
   * Multiple training runs in parallel using multiprocessing (the processes have independent agents and environments)
   * Few assumptions about environments, more easily compatible with rl envs approximating the open ai gym api
