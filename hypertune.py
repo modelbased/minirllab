@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process, Queue
 from bayes_opt import BayesianOptimization, UtilityFunction
 from utils import log_scalars
-from agents.sac_v01_baseline import Agent
+from agents.sac_crossq_trace import Agent
 
 '''
     Hyperparameter tuning using bayesian optimisation
@@ -44,9 +44,9 @@ def run_env(cmd_queue, sample_queue, res_queue, current_time, environment, env_n
 
         # Consider target metric carefully, depends on env and impacts pruning considerations
         # Scoreboard is cleared between pruning checkpoints
-        target_metric = lambda: np.median(scoreboard) 
+        # target_metric = lambda: np.median(scoreboard) 
         # target_metric = lambda: np.mean(scoreboard)
-        # target_metric = lambda: np.mean(np.sort(scoreboard)[int(len(scoreboard)*0.25):int(len(scoreboard)*0.75)]) # interquartile mean (iqm)
+        target_metric = lambda: np.mean(np.sort(scoreboard)[int(len(scoreboard)*0.25):int(len(scoreboard)*0.75)]) # interquartile mean (iqm)
 
         print("\nSTARTED WORKER PROCESS: ", process_num)
         print("TIME: ", current_time, "ENV: ", env_name, "DEVICE: ", device)
@@ -83,8 +83,6 @@ def run_env(cmd_queue, sample_queue, res_queue, current_time, environment, env_n
                           buffer_size       = run_steps, 
                           device            = device, 
                           seed              = random_seed, 
-                        #   l2init_lambda_q   = math.pow(10, next_point['l2init_lambda_q']), 
-                        #   l2init_lambda_a   = math.pow(10, next_point['l2init_lambda_a']), 
                         #   rr                = next_point['replay_ratio'], 
                         #   q_lr              = math.pow(10, next_point['q_lr']), 
                         #   actor_lr          = math.pow(10, next_point['actor_lr']),
@@ -113,20 +111,20 @@ def run_env(cmd_queue, sample_queue, res_queue, current_time, environment, env_n
             for step in range(run_steps):
 
                 # Step the environment and collect observations, shape: (batch, channels)
-                obs_tensor = th.tensor(obs, device=device, dtype=th.float32).unsqueeze(0)
-                action = agent.choose_action(obs_tensor)
-                action_numpy = action.cpu().squeeze().numpy()
-                obs, reward, terminated, truncated, info = env.step(action_numpy)
-                done = (terminated or truncated)
-                done_tensor = th.tensor(done, device=device, dtype=th.bool).unsqueeze(0)
-                reward_tensor = th.tensor(reward, device=device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
-                agent.store_transition(reward_tensor, done_tensor)
+                obs_th    = th.tensor(obs, device=device, dtype=th.float32).unsqueeze(0)
+                action_th = agent.choose_action(obs_th)
+                action_np = action_th.cpu().squeeze().numpy()
+                obs, reward,   terminated, truncated, info = env.step(action_np)
+                done_np   = (terminated or truncated)
+                done_th   = th.tensor(done_np, device=device, dtype=th.bool).unsqueeze(0)
+                reward_th = th.tensor(reward, device=device, dtype=th.float32).unsqueeze(0).unsqueeze(0)
+                agent.store_transition(reward_th, done_th)
 
                 # Episodic score
                 score += reward
 
                 # Track episodic score
-                if done:
+                if done_np:
                     scoreboard = np.append(scoreboard, score)
                     obs, info  = env.reset(seed=r_seed_mixed)
                     writer.add_scalar(f"score/{env_name}", score, step)
@@ -191,12 +189,12 @@ def main():
     
     # System parameters
     random_seed         = 42                                    # default: 42
-    num_workers_cpu     = 8                                     # number of workers in cpu, cpu can be faster sometimes (e.g. smaller model sizes & cpu environment)
+    num_workers_cpu     = 0                                     # number of workers in cpu, cpu can be faster sometimes (e.g. smaller model sizes & cpu environment)
     num_workers_cuda    = 8                                     # number of workers in cuda 
     max_workers         = num_workers_cpu + num_workers_cuda    # Max number of workers
     prune_chkpoints     = 4                                     # should be divisor of run_steps; this many pruning section per run_steps
     os.nice(10)                                                 # don't hog the system
-    th.set_num_threads(1)                                       # usually no faster with more, but parallel runs are more efficient when th.threads=1 (depending on hardware!)
+    th.set_num_threads(2)                                       # usually no faster with more, but parallel runs are more efficient when th.threads=1 (depending on hardware!)
     np.random.seed(random_seed)                                 # also given to agent
 
     # Select only one environment unless reward/target_metric has been scaled
@@ -206,13 +204,13 @@ def main():
     # Box 2D (action range -1..+1)
     # environments['LunarLanderContinuous-v2']    = {'run_steps': int(120e3)}
     # environments['BipedalWalker-v3']            = {'run_steps': int(400e3)}
-    # environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(  1e6)}
+    environments['BipedalWalkerHardcore-v3']    = {'run_steps': int(  1e6)}
     
     # Mujoco (action range -1..+1 except Humanoid which is -0.4..+0.4)
     # environments['Ant-v4']                      = {'run_steps': int(20e3)}
     # environments['HalfCheetah-v4']              = {'run_steps': int(400e3)}
     # environments['Walker2d-v4']                 = {'run_steps': int(400e3)}
-    environments['Humanoid-v4']                 = {'run_steps': int(200e3)}
+    # environments['Humanoid-v4']                 = {'run_steps': int(200e3)}
 
     # Start time of all runs
     current_time = time.strftime('%j_%H:%M')
@@ -236,9 +234,9 @@ def main():
                         # 'min_similarity'  : (0.5, 1.0),
                         # 'pivotal_reward'  : (0.01, 2.0),
                         # 'weight_decay'    : (0.0, 0.1),
-                        'l2init_lambda_q'   : (math.log10(1e-5), math.log10(1e-2)),
-                        'l2init_lambda_a'   : (math.log10(1e-5), math.log10(1e-2)),
-                        'replay_ratio'      : (4, 12),
+                        # 'l2init_lambda_q'   : (math.log10(1e-5), math.log10(1e-2)),
+                        # 'l2init_lambda_a'   : (math.log10(1e-5), math.log10(1e-2)),
+                        'replay_ratio'      : (1, 8),
                         # 'q_lr'              : (math.log10(5e-4), math.log10(3e-3)),
                         # 'alpha_lr'          : (math.log10(5e-4), math.log10(3e-3)),
                         # 'actor_lr'          : (math.log10(6e-5), math.log10(9e-4)),

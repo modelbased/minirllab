@@ -4,7 +4,7 @@ import numpy as np
 import os, time, argparse
 from torch.utils.tensorboard import SummaryWriter
 from utils import log_scalars
-from agents.ppo_v01_baseline import Agent
+from agents.ppo_baseline import Agent
 
 '''
 Vectorised gym script to test and tune continous agents
