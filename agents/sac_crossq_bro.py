@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from types import SimpleNamespace
 from .utils import avg_weight_magnitude, count_dead_units, dormant_ratio
 from .buffers import ReplayBufferSAC
-from torchinfo import summary
+# from torchinfo import summary
 
 '''
     Based on https://github.com/vwxyzjn/cleanrl
@@ -23,10 +23,11 @@ from torchinfo import summary
 
     Performance optimisations inspired by BRO and friends:
     - BRO: Bigger, Regularized, Optimistic: scaling for compute and sample-efficient continuous control https://arxiv.org/abs/2405.16158
-    – SR-SA: Sample-Efficient Reinforcement Learning by Breaking the Replay Ratio Barrier https://openreview.net/forum?id=OpC-9aBBVJe 
+    – SR-SAC: Sample-Efficient Reinforcement Learning by Breaking the Replay Ratio Barrier https://openreview.net/forum?id=OpC-9aBBVJe 
     - Overestimation, Overfitting, and Plasticity https://arxiv.org/abs/2403.00514
 '''
 
+# Using CrossQ structure with batch normalisation
 class CrossQBlock(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
@@ -34,10 +35,10 @@ class CrossQBlock(nn.Module):
         self.cqb = nn.Sequential(
             nn.Linear(in_dim, out_dim, bias=False), # batchnorm has bias, this one is redundant
             nn.BatchNorm1d(out_dim, momentum=0.01), # CrossQ momentum
-            nn.ReLU(),
+            nn.LeakyReLU(),                         # LeakyReLU = similar performance to ReLU but better plasticiy metrics
             nn.Linear(out_dim, out_dim, bias=False), # batchnorm has bias, this one is redundant
             nn.BatchNorm1d(out_dim, momentum=0.01), # CrossQ momentum
-            nn.ReLU(),
+            nn.LeakyReLU(),
         )
 
     def forward(self, x):
@@ -48,6 +49,7 @@ class SoftQNetwork(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_dim=256):
         super().__init__()
 
+        # ~5m param model with depth and skip connections (BRO sweet spot size ~5m parma)
         self.b1 = CrossQBlock(obs_dim + action_dim, hidden_dim)
         self.b2 = CrossQBlock(hidden_dim, hidden_dim)
         self.b3 = CrossQBlock(hidden_dim, hidden_dim)
@@ -62,7 +64,7 @@ class SoftQNetwork(nn.Module):
             x = torch.cat([o, a], 1)
         
         x1 = self.b1(x)
-        x2 = self.b2(x1) + x1
+        x2 = self.b2(x1) + x1 # add residuals
         x3 = self.b3(x2) + x2
         x4 = self.b4(x3)
 
@@ -79,10 +81,10 @@ class Actor(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim, bias=False),
             nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
-            nn.ReLU(),
+            nn.LeakyReLU(),                            # LeakyReLU = similar performance to ReLU but better plasticiy metrics
             nn.Linear(hidden_dim,hidden_dim, bias=False),
             nn.BatchNorm1d(hidden_dim, momentum=0.01), #CrossQ
-            nn.ReLU(),
+            nn.LeakyReLU(),
         )
         self.fc_mean   = nn.Linear(hidden_dim, act_dim)
         self.fc_logstd = nn.Linear(hidden_dim, act_dim)
@@ -125,8 +127,8 @@ class Agent:
                  num_env     = 1,
                  device      = 'cpu',
                  seed        = 42,
-                 rr          = 2,        # RR = 1 for CrossQ
-                 q_lr        = 1e-3,     # CrossQ learning rates
+                 rr          = 2,        # BRO Fast RR=2, BRO Default RR = 15
+                 q_lr        = 1e-3,     # BRO learning rates seem better than CrossQ LRs
                  actor_lr    = 1e-3,
                  alpha_lr    = 1e-3,
                  ):
@@ -162,8 +164,8 @@ class Agent:
         }
         self.h = SimpleNamespace(**hyperparameters)
 
-        # Loggin & debugging
-        self.qf1_a_values        = torch.tensor([0.0])
+        # Logging & debugging
+        self.qf1_a_values        = torch.tensor([0.0]) # average values
         self.qf2_a_values        = torch.tensor([0.0])
         self.qf1_loss            = 0
         self.qf2_loss            = 0
@@ -182,11 +184,12 @@ class Agent:
 
 
         # Instantiate actor and Q networks, optimisers
-        # CrossQ uses Adam but experience with AdamW is better
+        # CrossQ uses Adam but experience with AdamW is better (BRO uses AdamW)
         self.qf1        = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
         self.qf2        = SoftQNetwork(self.obs_dim, self.action_dim, self.h.q_hidden_dim).to(device)
         self.q_optim    = torch.optim.AdamW(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=self.h.q_lr, betas=self.h.adam_betas)
         
+        # Check model size and architecture
         # summary(self.qf1, input_size=(1, self.obs_dim+self.action_dim))       
         # exit()
 
@@ -194,7 +197,7 @@ class Agent:
         self.actor_optim = torch.optim.AdamW(list(self.actor.parameters()), lr=self.h.a_lr)
         
         # Use automatic entropy tuning
-        self.target_entropy = -(torch.prod(torch.Tensor((self.action_dim,))).to(device)).item()
+        self.target_entropy = torch.tensor(-self.action_dim, device=device, requires_grad=False)
         self.log_alpha      = torch.tensor((math.log(0.1)), requires_grad=True, device=device)
         self.alpha          = self.log_alpha.exp().item()
         self.alpha_optim    = torch.optim.AdamW([self.log_alpha], lr=self.h.alpha_lr)
@@ -287,6 +290,7 @@ class Agent:
                     self.qf1.train()
                     self.qf2.train()
 
+                    # Not clear mean() is better than min() here though BRO seems to use mean() to actor training too
                     min_qf_pi       = torch.min(qf1_pi, qf2_pi).view(-1)
                     self.actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
